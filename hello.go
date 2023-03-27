@@ -30,6 +30,10 @@ type LocalPlayer struct {
 	x int
 	y int
 	waitingOnAssertion int
+	rewardData []uint8
+	floodData []uint8
+	tilesData []uint8
+	rewardApothem int
 }
 
 func loadSpritesheet(renp *sdl.Renderer) *sdl.Texture {
@@ -52,6 +56,10 @@ var winp *sdl.Window
 var renp *sdl.Renderer
 var locpl LocalPlayer
 var WalkVectors = [4]Pos { Pos{0,-1}, Pos{1,0}, Pos{0,1}, Pos{-1,0}}
+var MouseX int32
+var MouseY int32
+var MouseXT int
+var MouseYT int
 
 
 func modulo(a, b int32) int32 {
@@ -127,9 +135,7 @@ func generateFlood(apoth int) []uint8 {
 	var walkable uint8 = 255
 	var unwalkable uint8 = 254
 
-	tiles := worldGetRange(
-		locpl.x - apoth, locpl.y - apoth,
-		locpl.x + apoth, locpl.y + apoth)
+	tiles := locpl.tilesData
 	flood := make([]uint8, len(tiles))
 	for i := range flood {
 		if canWalkOnTile(tiles[i]) {
@@ -169,11 +175,78 @@ func generateFlood(apoth int) []uint8 {
 	return flood
 }
 
+func updatePlayerTiles() {
+	apoth := locpl.rewardApothem
+	locpl.tilesData = worldGetRange(
+		locpl.x - apoth, locpl.y - apoth,
+		locpl.x + apoth, locpl.y + apoth)
+	updatePlayerFlood()
+}
+
+func updatePlayerFlood() {
+	locpl.floodData = generateFlood(locpl.rewardApothem)
+	updatePlayerReward()
+}
+
+func updatePlayerReward() {
+//	rmx := int(MouseX) - 300
+//	rmy := int(MouseY) - 300
+	i := 0
+	apoth := locpl.rewardApothem
+	flood := locpl.floodData
+	tiles := locpl.tilesData
+	diam := apoth * 2 + 1
+	res := make([]uint8, diam * diam)
+	for y := -apoth; y <= apoth; y++ {
+	for x := -apoth; x <= apoth; x++ {
+		if flood[i] > 32 {
+			res[i] = 0
+			i++
+			continue
+		}
+		val := uint8(0)
+		dx := x - MouseXT
+		dy := y - MouseYT
+		distq := dx * dx + dy * dy
+		if distq == 0 {
+			val = 45
+		} else if distq <= 50 {
+			val = 40
+		} else {
+			val = 20
+		}
+		if tiles[i] >= 0x91 && tiles[i] <= 0x94 {
+			val += 10
+		}
+		res[i] = val
+		i++
+	}}
+	locpl.rewardData = res
+}
+
+func mostRewardingRelpos() (int, int) {
+	i := 0
+	apoth := locpl.rewardApothem
+	minv := uint8(0)
+	minx := 0
+	miny := 0
+	for y := -apoth; y <= apoth; y++ {
+	for x := -apoth; x <= apoth; x++ {
+		if locpl.rewardData[i] > minv {
+			minv = locpl.rewardData[i]
+			minx = x
+			miny = y
+		}
+		i++
+	}}
+	return minx, miny
+}
+
 func moveToRelpos(rx, ry int) {
-	apoth := 33
+	apoth := locpl.rewardApothem
 	diam := apoth * 2 + 1
 	o := apoth + apoth * diam
-	tiles := generateFlood(apoth)
+	tiles := locpl.floodData
 	p := o + rx + ry * diam
 	stepc := tiles[p]
 	if stepc >= uint8(apoth) { return }
@@ -197,6 +270,7 @@ func moveToRelpos(rx, ry int) {
 	}
 	qcAssertPos()
 	qcGetTiles("30")
+	updatePlayerTiles()
 }
 
 func worldSetTile(x, y int, tile uint8) {
@@ -266,6 +340,7 @@ func cqSetLocalPlayerPos(cmd map[string] interface{}) {
 		locpl.x = x
 		locpl.y = y
 		locpl.waitingOnAssertion = -1;
+		updatePlayerTiles()
 	} else if locpl.waitingOnAssertion > 0 {
 		locpl.waitingOnAssertion--;
 	} else if asserted != servpos {
@@ -294,6 +369,7 @@ func cqSetTiles(cmd map[string] interface{}) {
 		i++
 	}
 	}
+	updatePlayerTiles()
 }
 
 var comque = make([]string, 0)
@@ -340,8 +416,8 @@ func draw() {
 			128*8, 128*8 }
 		renp.Copy(v.texture, srcr, dstr)
 	}
-	apoth := 20
-	tiles := generateFlood(apoth)
+	apoth := locpl.rewardApothem
+	tiles := locpl.rewardData
 	i := 0
 	renp.SetDrawBlendMode(sdl.BLENDMODE_BLEND)
 	for y := -apoth; y <= apoth; y++ {
@@ -373,6 +449,7 @@ func playerWalk(dir uint8) {
 
 func gameloop(ch <-chan map[string]interface{}, conn *websocket.Conn) {
 	locpl.waitingOnAssertion = 0
+	updatePlayerTiles()
 	qcAssertPos()
 	qcGetTiles("30")
 	qc("\"commandName\":\"startPlaying\"")
@@ -406,12 +483,23 @@ func gameloop(ch <-chan map[string]interface{}, conn *websocket.Conn) {
 			case *sdl.MouseButtonEvent:
 				e := ev.(*sdl.MouseButtonEvent)
 				if e.Type == sdl.MOUSEBUTTONUP {
-					cxt0 := int32(300-4)
-					cyt0 := int32(300-4)
-					rx := int(floordiv(e.X - cxt0, 8))
-					ry := int(floordiv(e.Y - cyt0, 8))
-					moveToRelpos(rx, ry)
+					//cxt0 := int32(300-4)
+					//cyt0 := int32(300-4)
+					//rx := int(floordiv(e.X - cxt0, 8))
+					//ry := int(floordiv(e.Y - cyt0, 8))
+					//moveToRelpos(rx, ry)
+					x, y := mostRewardingRelpos()
+					moveToRelpos(x, y)
 				}
+			case *sdl.MouseMotionEvent:
+				e := ev.(*sdl.MouseMotionEvent)
+				MouseX = e.X
+				MouseY = e.Y
+				cxt0 := int32(300-4)
+				cyt0 := int32(300-4)
+				MouseXT = int(floordiv(e.X - cxt0, 8))
+				MouseYT = int(floordiv(e.Y - cyt0, 8))
+				updatePlayerReward()
 			}
 		}
 		//playerWalk(0)
@@ -455,6 +543,7 @@ func main() {
 	renp = ren
 	locpl.x = 0
 	locpl.y = 0
+	locpl.rewardApothem = 33
 	if err != nil { panic(err) }
 	defer winp.Destroy()
 	defer renp.Destroy()
