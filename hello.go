@@ -24,6 +24,7 @@ type Chunk struct {
 
 type World struct {
 	chunks map[struct { x, y int }] *Chunk
+	enemies []Pos
 }
 
 type LocalPlayer struct {
@@ -60,6 +61,7 @@ var MouseX int32
 var MouseY int32
 var MouseXT int
 var MouseYT int
+var unprocessedCommands = 0
 
 
 func modulo(a, b int32) int32 {
@@ -67,6 +69,13 @@ func modulo(a, b int32) int32 {
 }
 func floordiv(a, b int32) int32 {
 	return (a - modulo(a, b)) / b
+}
+func abs(a int) int {
+	if a < 0 {
+		return -a
+	} else {
+		return a
+	}
 }
 
 func canWalkOnTile(tile uint8) bool {
@@ -221,6 +230,16 @@ func updatePlayerReward() {
 		res[i] = val
 		i++
 	}}
+	for _, enemypos := range world.enemies {
+		dx := enemypos.x - locpl.x
+		dy := enemypos.y - locpl.y
+		if abs(dx) < apoth - 2 && abs(dy) < apoth - 2 {
+			for y := dy - 2; y <= dy + 2; y++ {
+			for x := dx - 2; x <= dx + 2; x++ {
+				res[(x + apoth) + (y + apoth) * diam] = 1
+			}}
+		}
+	}
 	locpl.rewardData = res
 }
 
@@ -274,6 +293,11 @@ func moveToRelpos(rx, ry int) {
 }
 
 func worldSetTile(x, y int, tile uint8) {
+	if tile == 0x95 {
+		fmt.Println("rest zone at ", x + 2, y)
+	} else if tile == 0x96 {
+		fmt.Println("rest zone at ", x - 2, y)
+	}
 	cx := x &^ 127
 	cy := y &^ 127
 	var pos struct { x, y int }
@@ -328,6 +352,20 @@ func cqSetLocalPlayerInfo(cmd map[string] interface{}) {
 
 var posAssertions = make([]Pos, 0)
 
+func cqAddEntity(cmd map[string] interface{}) {
+	einfo := cmd["entityInfo"].(map[string] interface{})
+	clas := einfo["className"].(string)
+	if clas == "Player" { return }
+	if clas != "Enemy" {
+		fmt.Println("unknown entity class", clas)
+		return
+	}
+	pos := einfo["pos"].(map[string] interface{})
+	x := int(pos["x"].(float64))
+	y := int(pos["y"].(float64))
+	world.enemies = append(world.enemies, Pos{x, y})
+}
+
 func cqSetLocalPlayerPos(cmd map[string] interface{}) {
 	pos := cmd["pos"].(map[string] interface{})
 	x := int(pos["x"].(float64))
@@ -355,6 +393,10 @@ func qcAssertPos() {
 	pos := Pos{locpl.x, locpl.y}
 	posAssertions = append(posAssertions, pos)
 	qc("\"commandName\":\"assertPos\",\"pos\":{\"x\":0.5,\"y\":0.5}")
+}
+
+func qcGetEntities() {
+	qc("\"commandName\":\"getEntities\"")
 }
 
 func cqSetTiles(cmd map[string] interface{}) {
@@ -416,10 +458,30 @@ func draw() {
 			128*8, 128*8 }
 		renp.Copy(v.texture, srcr, dstr)
 	}
+
+	renp.SetDrawBlendMode(sdl.BLENDMODE_BLEND)
+
+	{
+		renp.SetDrawColor(170, 0, 255, 170)
+		dstr := &sdl.Rect{
+			int32(cxt0),
+			int32(cyt0),
+			8, 8 }
+		renp.FillRect(dstr)
+	}
+
+	for _, enemypos := range world.enemies {
+		renp.SetDrawColor(255, 0, 170, 170)
+		dstr := &sdl.Rect{
+			int32((enemypos.x - locpl.x)*8 + cxt0  - 8),
+			int32((enemypos.y - locpl.y)*8 + cyt0  - 8),
+			24, 24 }
+		renp.FillRect(dstr)
+	}
+
 	apoth := locpl.rewardApothem
 	tiles := locpl.rewardData
 	i := 0
-	renp.SetDrawBlendMode(sdl.BLENDMODE_BLEND)
 	for y := -apoth; y <= apoth; y++ {
 	for x := -apoth; x <= apoth; x++ {
 		v := tiles[i] * 5
@@ -454,28 +516,33 @@ func gameloop(ch <-chan map[string]interface{}, conn *websocket.Conn) {
 	qcGetTiles("30")
 	qc("\"commandName\":\"startPlaying\"")
 	qcSend(conn)
+	li := 0
 	gloop:
 	for {
-		cmdloop:
-		for {
-			select {
-			case v := <-ch:
-				switch v["commandName"].(string) {
-				case "setLocalPlayerPos":
-					cqSetLocalPlayerPos(v)
-				case "setLocalPlayerInfo":
-					cqSetLocalPlayerInfo(v)
-				case "setRespawnPos":
-				case "setTiles":
-					cqSetTiles(v)
-				case "setInventory":
-				default:
-					fmt.Println(v["commandName"].(string))
-				}
+		regenReward := false
+		for ; unprocessedCommands > 0; {
+			unprocessedCommands--
+			v := <-ch
+			switch v["commandName"].(string) {
+			case "setLocalPlayerPos":
+				cqSetLocalPlayerPos(v)
+			case "setLocalPlayerInfo":
+				cqSetLocalPlayerInfo(v)
+			case "setRespawnPos":
+			case "setTiles":
+				cqSetTiles(v)
+			case "removeAllEntities":
+				world.enemies = make([]Pos, 0)
+				regenReward = true
+			case "addEntity":
+				cqAddEntity(v)
+				regenReward = true
+			case "setInventory":
 			default:
-				break cmdloop
+				fmt.Println(v["commandName"].(string))
 			}
 		}
+		if regenReward { updatePlayerReward() }
 		for ev := sdl.PollEvent(); ev != nil; ev = sdl.PollEvent() {
 			switch ev.(type) {
 			case *sdl.QuitEvent:
@@ -503,10 +570,14 @@ func gameloop(ch <-chan map[string]interface{}, conn *websocket.Conn) {
 			}
 		}
 		//playerWalk(0)
+		if li % 10 == 0 {
+			qcGetEntities()
+		}
 		qcSend(conn)
 		draw()
 		t, _ := time.ParseDuration("50ms")
 		time.Sleep(t)
+		li++
 	}
 	fmt.Println("gameloop finished")
 }
@@ -523,6 +594,7 @@ func readloop(ctx context.Context, ch chan<- map[string]interface{}, conn *webso
 		}
 		if v["success"].(bool) {
 			cmds := v["commandList"].([]interface {})
+			unprocessedCommands += len(cmds)
 			for _, cmd := range cmds {
 				ch <- cmd.(map[string] interface{})
 			}
