@@ -9,6 +9,9 @@ import "time"
 import "github.com/veandco/go-sdl2/sdl"
 import "context"
 import "strconv"
+import "os"
+import "bufio"
+import "strings"
 
 
 type Pos struct {
@@ -48,10 +51,29 @@ func loadSpritesheet(renp *sdl.Renderer) *sdl.Texture {
 
 // type Message
 
-var LoginUrl = "http://localhost:2626/loginAction"
-var UpdateUrl = "ws://localhost:2626/gameUpdate"
-var Username = "a"
-var Password = "a"
+var LoginUrl string // "http://localhost:2626/loginAction"
+var UpdateUrl string // "ws://localhost:2626/gameUpdate"
+var Username string
+var Password string
+
+func readLoginInfo() {
+	f, err := os.Open("login-info.txt")
+	if err != nil { panic(err) }
+	fmt.Println(LoginUrl, UpdateUrl)
+	sc := bufio.NewScanner(f)
+	sc.Split(bufio.ScanLines)
+	sc.Scan()
+	LoginUrl = strings.TrimSpace(sc.Text())
+	sc.Scan()
+	UpdateUrl = strings.TrimSpace(sc.Text())
+	sc.Scan()
+	Username = strings.TrimSpace(sc.Text())
+	sc.Scan()
+	Password = strings.TrimSpace(sc.Text())
+	fmt.Println("server: ", LoginUrl, UpdateUrl)
+	f.Close()
+}
+
 var world World
 var winp *sdl.Window
 var renp *sdl.Renderer
@@ -606,6 +628,7 @@ func readloop(ctx context.Context, ch chan<- map[string]interface{}, conn *webso
 }
 
 func main() {
+	readLoginInfo()
 	world.chunks = make(map[struct{x, y int}] *Chunk)
 	fmt.Println("Hello word")
 	err := sdl.Init(sdl.INIT_EVERYTHING)
