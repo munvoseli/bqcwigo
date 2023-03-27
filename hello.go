@@ -2,11 +2,12 @@ package main
 import "fmt"
 import "net/http"
 import "net/url"
-//import "io"
+import "io"
 import "github.com/gorilla/websocket"
 //import "sync"
 import "time"
 import "github.com/veandco/go-sdl2/sdl"
+import "github.com/veandco/go-sdl2/img"
 import "context"
 import "strconv"
 import "os"
@@ -40,10 +41,126 @@ type LocalPlayer struct {
 	rewardApothem int
 }
 
-func loadSpritesheet(renp *sdl.Renderer) *sdl.Texture {
-	surf, err := sdl.LoadBMP("sprites.bmp")
+func drawTile(tile uint8, dstr *sdl.Rect) {
+	if tile >= 0x80 && tile <= 0x88 {
+		r := ([9] uint8 {255,255,255,238,  0,  0,  0,204,170})[tile - 0x80];
+		g := ([9] uint8 {255,  0,170,238,204,204,  0,  0,170})[tile - 0x80];
+		b := ([9] uint8 {255,  0,  0,  0,  0,204,255,204,170})[tile - 0x80];
+		renp.SetDrawColor(r, g, b, 255)
+		renp.FillRect(dstr)
+	} else if tile >= 0x89 && tile <= 0x90 {
+		renp.SetDrawColor(255, 255, 255, 255)
+		renp.FillRect(dstr)
+		r := ([9] uint8 {255,255,255,170,170,170,255,238})[tile - 0x89];
+		g := ([9] uint8 {170,238,255,255,255,170,170,238})[tile - 0x89];
+		b := ([9] uint8 {170,170,170,170,255,255,255,238})[tile - 0x89];
+		renp.SetDrawColor(r, g, b, 255)
+		inset := int32(2)
+		dstr.X += inset
+		dstr.Y += inset
+		dstr.W -= 2 * inset
+		dstr.H -= 2 * inset
+		renp.FillRect(dstr)
+	} else if tile >= 0x21 && tile <= 0x7f {
+		renp.SetDrawColor(255, 255, 255, 255)
+		renp.FillRect(dstr)
+		srcr := &sdl.Rect{
+			int32(tile & 0xf) * 8,
+			int32(tile >> 4) * 8, 8, 8}
+		renp.Copy(spritesheet, srcr, dstr)
+	} else {
+		renp.SetDrawColor(85, 85, 85, 255)
+		renp.FillRect(dstr)
+	}
+}
+
+func loadChunkMaybeFile(x, y int) Chunk {
+	f, err := os.Open(fmt.Sprintf("chunks/%d_%d.dat", x, y))
+	if err != nil {
+		fmt.Println(err)
+		return emptyChunk(x, y)
+	}
+	buf, err := io.ReadAll(f)
+	if err != nil {
+		fmt.Println(err)
+		return emptyChunk(x, y)
+	}
+	var tiles [128*128]uint8
+	b := []uint8(buf)
+	switch b[0] {
+	case 0: // raw
+		for ic := 0; ic < 128*128; ic++ {
+			tiles[ic] = buf[ic + 9]
+		}
+	case 1: // run-length
+		ib := 9
+		ic := 0
+		for ic != 128 * 128 {
+			if ic > 128 * 128 {
+				panic("chunk parse went wrong")
+			}
+			icNext := ic + int(buf[ib])
+			ib++
+			for i := ic; i < icNext; i++ {
+				tiles[i] = buf[ib]
+			}
+			ib++
+			ic = icNext
+		}
+	default:
+		panic(fmt.Sprintf("unknown chunk format in %d %d", x, y))
+	}
+
+	tex, err := renp.CreateTexture(0, sdl.TEXTUREACCESS_TARGET, 8*128, 8*128)
 	if err != nil { panic(err) }
-	texp, err := renp.CreateTextureFromSurface(surf)
+	i := 0
+	renp.SetRenderTarget(tex)
+	for y := int32(0); y < 128; y++ {
+	for x := int32(0); x < 128; x++ {
+		dstr := &sdl.Rect{ x * 8, y * 8, 8, 8 }
+		drawTile(tiles[i], dstr)
+		i++
+	}}
+	return Chunk{ tiles, x, y, tex }
+}
+
+func saveChunk(chunk *Chunk) {
+	buf := []uint8 {
+		1,
+		uint8((chunk.x0 >> 24) & 255),
+		uint8((chunk.x0 >> 16) & 255),
+		uint8((chunk.x0 >>  8) & 255),
+		uint8((chunk.x0      ) & 255),
+		uint8((chunk.y0 >> 24) & 255),
+		uint8((chunk.y0 >> 16) & 255),
+		uint8((chunk.y0 >>  8) & 255),
+		uint8((chunk.y0      ) & 255),
+	}
+	ic := 0
+	for {
+		if ic == 128*128 { break }
+		ics := ic
+		tile := chunk.tiles[ic]
+		for {
+			ic++
+			if ic == 128*128 ||
+				ic == 255+ics ||
+				chunk.tiles[ic] != tile { break }
+		}
+		leng := uint8(ic - ics)
+		buf = append(buf, leng)
+		buf = append(buf, tile)
+	}
+	f, err := os.Create(fmt.Sprintf("chunks/%d_%d.dat", chunk.x0, chunk.y0))
+	if err != nil { panic(err) }
+	f.Write(buf)
+}
+
+func loadSpritesheet(renp *sdl.Renderer) *sdl.Texture {
+//	surf, err := sdl.LoadBMP("sprites.bmp")
+//	if err != nil { panic(err) }
+//	texp, err := renp.CreateTextureFromSurface(surf)
+	texp, err := img.LoadTexture(renp, "sprites.png")
 	if err != nil { panic(err) }
 	return texp
 }
@@ -84,6 +201,7 @@ var MouseY int32
 var MouseXT int
 var MouseYT int
 var unprocessedCommands = 0
+var spritesheet *sdl.Texture
 
 
 func modulo(a, b int32) int32 {
@@ -310,7 +428,7 @@ func moveToRelpos(rx, ry int) {
 		qcWalk(walks[i])
 	}
 	qcAssertPos()
-	qcGetTiles("30")
+	qcGetTiles("50")
 	updatePlayerTiles()
 }
 
@@ -327,7 +445,7 @@ func worldSetTile(x, y int, tile uint8) {
 	pos.y = cy
 	chunk, exists := world.chunks[pos]
 	if !exists {
-		c := emptyChunk(cx, cy)
+		c := loadChunkMaybeFile(cx, cy)
 		chunk = &c
 		world.chunks[pos] = &c
 	}
@@ -341,31 +459,9 @@ func worldSetTile(x, y int, tile uint8) {
 		//	fmt.Println(t2)
 		//	panic("aaaaaa")
 		//}
-		dstr := &sdl.Rect{ int32(rx*8), int32(ry*8), 8, 8 }
 		renp.SetRenderTarget(chunk.texture)
-		if tile >= 0x80 && tile <= 0x88 {
-			r := ([9] uint8 {255,255,255,238,  0,  0,  0,204,170})[tile - 0x80];
-			g := ([9] uint8 {255,  0,170,238,204,204,  0,  0,170})[tile - 0x80];
-			b := ([9] uint8 {255,  0,  0,  0,  0,204,255,204,170})[tile - 0x80];
-			renp.SetDrawColor(r, g, b, 255)
-			renp.FillRect(dstr)
-		} else if tile >= 0x89 && tile <= 0x90 {
-			renp.SetDrawColor(255, 255, 255, 255)
-			renp.FillRect(dstr)
-			r := ([9] uint8 {255,255,255,170,170,170,255,238})[tile - 0x89];
-			g := ([9] uint8 {170,238,255,255,255,170,170,238})[tile - 0x89];
-			b := ([9] uint8 {170,170,170,170,255,255,255,238})[tile - 0x89];
-			renp.SetDrawColor(r, g, b, 255)
-			inset := int32(2)
-			dstr.X += inset
-			dstr.Y += inset
-			dstr.W -= 2 * inset
-			dstr.H -= 2 * inset
-			renp.FillRect(dstr)
-		} else {
-			renp.SetDrawColor(85, 85, 85, 255)
-			renp.FillRect(dstr)
-		}
+		dstr := &sdl.Rect{ int32(rx*8), int32(ry*8), 8, 8 }
+		drawTile(tile, dstr)
 	}
 }
 
@@ -427,12 +523,14 @@ func cqSetTiles(cmd map[string] interface{}) {
 	sz := int(cmd["size"].(float64))
 	ls := cmd["tileList"].([]interface{})
 	i := 0
+	renp.SetDrawBlendMode(sdl.BLENDMODE_BLEND)
 	for yi := y; yi < y + sz; yi++ {
 	for xi := x; xi < x + sz; xi++ {
 		worldSetTile(xi, yi, uint8(ls[i].(float64)))
 		i++
 	}
 	}
+	renp.SetDrawBlendMode(sdl.BLENDMODE_NONE)
 	updatePlayerTiles()
 }
 
@@ -636,6 +734,8 @@ func main() {
 	win, ren, err := sdl.CreateWindowAndRenderer(600, 600, 0)
 	winp = win
 	renp = ren
+	renp.SetDrawBlendMode(sdl.BLENDMODE_BLEND)
+	spritesheet = loadSpritesheet(renp)
 	locpl.x = 0
 	locpl.y = 0
 	locpl.rewardApothem = 33
@@ -655,6 +755,9 @@ func main() {
 	fmt.Println("Hello world")
 	ctx.Done()
 	cancel()
+	for _, chunk := range world.chunks {
+		saveChunk(chunk)
+	}
 //	close(cmds)
 	sdl.Quit()
 }
