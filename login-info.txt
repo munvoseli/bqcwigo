@@ -1,4 +1,4 @@
-http://localhost:2626/loginAction
-ws://localhost:2626/gameUpdate
-a
-a
+https://ostracodapps.com:2626/loginAction
+wss://ostracodapps.com:2626/gameUpdate
+username
+password
