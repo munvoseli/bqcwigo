@@ -31,6 +31,13 @@ type World struct {
 	enemies []Pos
 }
 
+type Crack struct {
+	active bool
+	pos Pos
+	breakTime time.Time
+	tileBefore uint8
+}
+
 type LocalPlayer struct {
 	x int
 	y int
@@ -40,9 +47,9 @@ type LocalPlayer struct {
 	tilesData []uint8
 	rewardApothem int
 	lastFullStepsTime time.Time
-	lastBreakTime time.Time
-	lastBreakPos Pos
+	crack Crack
 	stepsTakenSinceFull int
+	stepsTakenSinceGetTiles int
 	towardsGoal map[Pos] Pos
 	walkingTowardsGoal bool
 }
@@ -50,6 +57,17 @@ type LocalPlayer struct {
 func getStepsLeft() int {
 	p := 32 + time.Since(locpl.lastFullStepsTime) / (62500 * time.Microsecond)
 	return int(p) - locpl.stepsTakenSinceFull
+}
+
+func distToEnemy(x, y int) int {
+	dist := 30
+	for _, epos := range world.enemies {
+		dx := abs(epos.x - x)
+		dy := abs(epos.y - y)
+		if dx >= dy && dx < dist { dist = dx
+		} else if dy >= dx && dy < dist { dist = dy }
+	}
+	return dist
 }
 
 /*
@@ -186,7 +204,6 @@ func astar(startpos Pos, endpos Pos) map[Pos] Pos {
 		}
 		return nm
 	}*/
-	fmt.Println("started a*")
 	for {
 		if len(openSet) == 0 {
 			panic("ksdflja")
@@ -198,7 +215,7 @@ func astar(startpos Pos, endpos Pos) map[Pos] Pos {
 		var current Pos
 		openSet, current = remFromHeap(openSet)
 		if current == endpos {
-			fmt.Println("got it")
+			//fmt.Println("got it")
 			return cameFrom//processCameFrom()
 		}
 		ma(current, Pos{current.x, current.y+1})
@@ -436,7 +453,7 @@ func emptyChunk(cx, cy int) Chunk {
 }
 
 func worldGetTile(x, y int) uint8 {
-	if x == locpl.lastBreakPos.x && y == locpl.lastBreakPos.y {
+	if x == locpl.crack.pos.x && y == locpl.crack.pos.y {
 		return 80
 	}
 	cx := x &^ 127
@@ -788,14 +805,20 @@ func qc(cmd string) {
 func qcWalk(dir uint8) {
 	qc("\"commandName\":\"walk\",\"direction\":" + strconv.Itoa(int(dir)))
 	locpl.stepsTakenSinceFull++
+	locpl.stepsTakenSinceGetTiles++
 }
 
 func qcGetTiles(sz string) {
 	qc("\"commandName\":\"getTiles\",\"size\":" + sz)
+	locpl.stepsTakenSinceGetTiles = 0
 }
 
 func qcRemoveTile(dir uint8) {
 	qc(fmt.Sprintf("\"commandName\":\"removeTile\",\"direction\":%d", dir))
+}
+
+func qcPlaceSymbolTile(t uint8) {
+	qc(fmt.Sprintf("\"commandName\":\"placeSymbolTile\",\"tile\":%d", t))
 }
 
 func draw() {
@@ -875,9 +898,8 @@ func playerWalk(dir uint8) {
 
 func playerMoveTowardsGoal() bool {
 	var reachedDestination bool
-	fmt.Println(getStepsLeft())
 	for {
-		if getStepsLeft() < 8 || time.Since(locpl.lastBreakTime) < 700 * time.Millisecond {
+		if getStepsLeft() < 8 || (getStepsLeft() < 24 && distToEnemy(locpl.x, locpl.y) > 3) || time.Since(locpl.crack.breakTime) < 700 * time.Millisecond {
 			reachedDestination = false
 			break
 		}
@@ -892,19 +914,28 @@ func playerMoveTowardsGoal() bool {
 		} else if dst.y < locpl.y { d = 0
 		} else if dst.x < locpl.x { d = 3
 		} else { panic("slkdfja") }
-		if canRemoveTile(worldGetTile(dst.x, dst.y)) {
+		tile := worldGetTile(dst.x, dst.y)
+		if canRemoveTile(tile) {
 			reachedDestination = false
-			locpl.lastBreakTime = time.Now()
-			locpl.lastBreakPos = dst
+			locpl.crack.breakTime = time.Now()
+			locpl.crack.pos = dst
+			locpl.crack.tileBefore = tile
 			qcRemoveTile(d)
 			break
 		}
 		qcWalk(d)
 		locpl.x = dst.x
 		locpl.y = dst.y
+		if locpl.x == locpl.crack.pos.x && locpl.y == locpl.crack.pos.y {
+			tletters := [8]uint8 {0x76, 0x6f, 0x79, 0x67,
+			                      0x74, 0x62, 0x70, 0x47}
+			qcPlaceSymbolTile(tletters[locpl.crack.tileBefore - 0x81])
+		}
 	}
 	qcAssertPos()
-	qcGetTiles("50")
+	if locpl.stepsTakenSinceGetTiles > 8 || reachedDestination {
+		qcGetTiles("50")
+	}
 	locpl.walkingTowardsGoal = !reachedDestination
 	return reachedDestination
 }
