@@ -39,6 +39,184 @@ type LocalPlayer struct {
 	floodData []uint8
 	tilesData []uint8
 	rewardApothem int
+	lastFullStepsTime time.Time
+	lastMineTime time.Time
+	stepsTakenSinceFull int
+	towardsGoal map[Pos] Pos
+	walkingTowardsGoal bool
+}
+
+func getStepsLeft() int {
+	p := 32 + time.Since(locpl.lastFullStepsTime) / (62500 * time.Microsecond)
+	return int(p) - locpl.stepsTakenSinceFull
+}
+
+/*
+you live, breathe
+you work
+you prepare a file
+you format a file
+you copy format from one file to another
+you use shortcuts or buttons to copy format
+you use desktop environment with a mouse
+
+it's turtles all the way down,
+and it's turtles all the way up,
+and knowing where the line is is guess-and-check
+
+
+requirements are what the customer and programmer can both understand
+
+
+it's simply inaccrate than everything is in a folder
+*/
+
+// https://en.wikipedia.org/wiki/A*_search_algorithm
+func astar(startpos Pos, endpos Pos) map[Pos] Pos {
+	g := make(map[Pos] int)
+	cameFrom := make(map[Pos] Pos)
+	h := func(p Pos) int {
+		return abs(p.x - endpos.x) +
+		       abs(p.y - endpos.y)
+	}
+	g[startpos] = h(startpos)
+	f := func(p Pos) int {
+		return g[p] + h(p)
+	}
+	maybeswap := func(heap []Pos, par, chi int) bool {
+		if f(heap[par]) > f(heap[chi]) {
+			v := heap[par]
+			heap[par] = heap[chi]
+			heap[chi] = v
+			return true
+		}
+		return false
+	}
+	addToHeap := func(heap []Pos, pos Pos) []Pos {
+		n := len(heap)
+		heap = append(heap, pos)
+		for {
+			if n == 1 { break }
+			p := n/2
+			na := 2*p
+			nb := na+1
+			maybeswap(heap, p, na)
+			if nb < len(heap) {
+				maybeswap(heap, p, nb)
+			}
+			n = p
+		}
+		return heap
+	}
+	remFromHeap := func(heap []Pos) ([]Pos, Pos) {
+		tile := heap[1]
+		heap[1] = heap[len(heap)-1]
+		heap = heap[0:len(heap)-1]
+		n := 1
+		for {
+			c1 := 2 * n
+			if c1 >= len(heap) { break }
+			c2 := c1 + 1
+			if c2 >= len(heap) {
+				maybeswap(heap, n, c1)
+				break
+			} else if f(heap[c1]) < f(heap[c2]) {
+				swapped := maybeswap(heap, n, c1)
+				if swapped {
+					n = c1
+				} else {
+					break
+				}
+			} else {
+				if maybeswap(heap, n, c2) {
+					n = c2
+				} else {
+					break
+				}
+			}
+		}
+		return heap, tile
+	}
+	heapContains := func(heap []Pos, p Pos) bool {
+		for i := 1; i < len(heap); i++ {
+			if heap[i] == p { return true }
+		}
+		return false
+	}
+	d := func(t uint8) int {
+		if t >= 0x81 && t <= 0x88 { return 20 }
+		if t >= 0x91 && t <= 0x94 { return -1 }
+		return 2
+	}
+	openSet := []Pos { Pos{0, 0}, startpos }
+	ma := func(current Pos, next Pos) {
+		t := worldGetTile(next.x, next.y)
+		if t < 3 { return }
+		tg := g[current] + d(t)
+		cg, exists := g[next]
+		if !exists || tg < cg {
+			g[next] = tg
+			cameFrom[next] = current
+			if !(heapContains(openSet, next)) {
+				openSet = addToHeap(openSet, next)
+			}
+		}
+	}
+	/*processCameFrom := func() map[Pos] uint8 {
+		nm := make(map[Pos] uint8)
+		for k, v := range cameFrom {
+			dx := v.x - k.x
+			dy := v.y - k.y
+			// you know, i thought i was really cool for figuring this out
+			//d := (uint8(dy > dx) << 1) | uint8(dy == 0)
+			var d uint8
+			if dy == -1 {
+				d = 0
+			} else if dy == 1 {
+				d = 2
+			} else if dx == 1 {
+				d = 1
+			} else if dx == -1 {
+				d = 3
+			} else {
+				panic("asljdfkalf")
+			}
+			nm[k] = d
+		}
+		return nm
+	}*/
+	for {
+		if len(openSet) == 1 { // just the placeholder element
+			fmt.Println("could find no path")
+			return cameFrom//processCameFrom()
+		}
+		var current Pos
+		openSet, current = remFromHeap(openSet)
+		if current == endpos {
+			//fmt.Println("got it")
+			return cameFrom//processCameFrom()
+		}
+		ma(current, Pos{current.x, current.y+1})
+		ma(current, Pos{current.x, current.y-1})
+		ma(current, Pos{current.x+1, current.y})
+		ma(current, Pos{current.x-1, current.y})
+	}
+}
+
+
+
+
+
+
+func unloadFarChunks() {
+	for pos, chunk := range world.chunks {
+		dx := abs(pos.x + 64 - locpl.x)
+		dy := abs(pos.y + 64 - locpl.y)
+		if dx > 512 || dy > 512 {
+			saveChunk(chunk)
+			delete(world.chunks, pos)
+		}
+	}
 }
 
 func drawTile(tile uint8, dstr *sdl.Rect) {
@@ -77,7 +255,6 @@ func drawTile(tile uint8, dstr *sdl.Rect) {
 func loadChunkMaybeFile(x, y int) Chunk {
 	f, err := os.Open(fmt.Sprintf("chunks/%d_%d.dat", x, y))
 	if err != nil {
-		fmt.Println(err)
 		return emptyChunk(x, y)
 	}
 	buf, err := io.ReadAll(f)
@@ -202,6 +379,8 @@ var MouseXT int
 var MouseYT int
 var unprocessedCommands = 0
 var spritesheet *sdl.Texture
+var Winhw = 960
+var Winhh = 500
 
 
 func modulo(a, b int32) int32 {
@@ -337,7 +516,51 @@ func updatePlayerFlood() {
 	updatePlayerReward()
 }
 
+func updatePlayerRewardUndirection() {
+	i := 0
+	apoth := locpl.rewardApothem
+	flood := locpl.floodData
+	tiles := locpl.tilesData
+	diam := apoth * 2 + 1
+	res := make([]uint8, diam * diam)
+	for y := -apoth; y <= apoth; y++ {
+	for x := -apoth; x <= apoth; x++ {
+		if flood[i] > 32 {
+			res[i] = 0
+			i++
+			continue
+		}
+		val := 60 - flood[i]
+		if tiles[i] >= 0x91 && tiles[i] <= 0x94 {
+			val += 50
+		}
+		res[i] = val
+		i++
+	}}
+	max := func(a, b int) int {
+		if a < b { return b }
+		return a
+	}
+	min := func(a, b int) int {
+		if a > b { return b }
+		return a
+	}
+	for _, enemypos := range world.enemies {
+		dx := enemypos.x - locpl.x
+		dy := enemypos.y - locpl.y
+		for y := max(dy - 3, -apoth); y <= min(dy + 3, apoth); y++ {
+		for x := max(dx - 3, -apoth); x <= min(dx + 3, apoth); x++ {
+			res[(x + apoth) + (y + apoth) * diam] = 1
+		}}
+	}
+	locpl.rewardData = res
+}
+
 func updatePlayerReward() {
+	updatePlayerRewardDirected()
+}
+
+func updatePlayerRewardDirected() {
 //	rmx := int(MouseX) - 300
 //	rmy := int(MouseY) - 300
 	i := 0
@@ -429,7 +652,7 @@ func moveToRelpos(rx, ry int) {
 	}
 	qcAssertPos()
 	qcGetTiles("50")
-	updatePlayerTiles()
+	//updatePlayerTiles()
 }
 
 func worldSetTile(x, y int, tile uint8) {
@@ -496,7 +719,7 @@ func cqSetLocalPlayerPos(cmd map[string] interface{}) {
 		locpl.x = x
 		locpl.y = y
 		locpl.waitingOnAssertion = -1;
-		updatePlayerTiles()
+		//updatePlayerTiles()
 	} else if locpl.waitingOnAssertion > 0 {
 		locpl.waitingOnAssertion--;
 	} else if asserted != servpos {
@@ -531,7 +754,7 @@ func cqSetTiles(cmd map[string] interface{}) {
 	}
 	}
 	renp.SetDrawBlendMode(sdl.BLENDMODE_NONE)
-	updatePlayerTiles()
+	//updatePlayerTiles()
 }
 
 var comque = make([]string, 0)
@@ -556,6 +779,7 @@ func qc(cmd string) {
 
 func qcWalk(dir uint8) {
 	qc("\"commandName\":\"walk\",\"direction\":" + strconv.Itoa(int(dir)))
+	locpl.stepsTakenSinceFull++
 }
 
 func qcGetTiles(sz string) {
@@ -567,8 +791,8 @@ func draw() {
 	renp.SetDrawColor(0, 0, 0, 255)
 	renp.Clear()
 
-	cxt0 := 300-4
-	cyt0 := 300-4
+	cxt0 := Winhw-4
+	cyt0 := Winhh-4
 	for _, v := range world.chunks {
 		if err != nil { panic(err) }
 		srcr := &sdl.Rect{ 0, 0, 128*8, 128*8 }
@@ -599,23 +823,31 @@ func draw() {
 		renp.FillRect(dstr)
 	}
 
-	apoth := locpl.rewardApothem
-	tiles := locpl.rewardData
-	i := 0
-	for y := -apoth; y <= apoth; y++ {
-	for x := -apoth; x <= apoth; x++ {
-		v := tiles[i] * 5
-		if v > 200 {
-			v = 200
-		}
-		renp.SetDrawColor(0, 0, 0, v)
-		dstr := &sdl.Rect{
-			int32(x * 8 + cxt0),
-			int32(y * 8 + cyt0), 8, 8}
-		renp.FillRect(dstr)
-		i++
-	}}
+//	apoth := locpl.rewardApothem
+//	tiles := locpl.rewardData
+//	i := 0
+//	for y := -apoth; y <= apoth; y++ {
+//	for x := -apoth; x <= apoth; x++ {
+//		v := tiles[i] * 5
+//		if v > 200 {
+//			v = 200
+//		}
+//		renp.SetDrawColor(0, 0, 0, v)
+//		dstr := &sdl.Rect{
+//			int32(x * 8 + cxt0),
+//			int32(y * 8 + cyt0), 8, 8}
+//		renp.FillRect(dstr)
+//		i++
+//	}}
 	renp.SetDrawBlendMode(sdl.BLENDMODE_NONE)
+
+	for k, v := range(locpl.towardsGoal) {
+		ax := (k.x - locpl.x)*8 + Winhw
+		ay := (k.y - locpl.y)*8 + Winhh
+		bx := (v.x - locpl.x)*8 + Winhw
+		by := (v.y - locpl.y)*8 + Winhh
+		renp.DrawLine(int32(ax), int32(ay), int32(bx), int32(by))
+	}
 	renp.Present()
 }
 
@@ -629,17 +861,47 @@ func playerWalk(dir uint8) {
 	}
 }
 
+func playerMoveTowardsGoal() bool {
+	var reachedDestination bool
+	fmt.Println(getStepsLeft())
+	for {
+		if getStepsLeft() < 8 {
+			reachedDestination = false
+			break
+		}
+		dst, exists := locpl.towardsGoal[Pos{locpl.x, locpl.y}]
+		if !exists {
+			reachedDestination = true
+			break
+		}
+		var d uint8
+		       if dst.x > locpl.x { d = 1
+		} else if dst.y > locpl.y { d = 2
+		} else if dst.y < locpl.y { d = 0
+		} else if dst.x < locpl.x { d = 3
+		} else { panic("slkdfja") }
+		qcWalk(d)
+		locpl.x = dst.x
+		locpl.y = dst.y
+	}
+	qcAssertPos()
+	qcGetTiles("50")
+	locpl.walkingTowardsGoal = !reachedDestination
+	return reachedDestination
+}
+
 func gameloop(ch <-chan map[string]interface{}, conn *websocket.Conn) {
 	locpl.waitingOnAssertion = 0
-	updatePlayerTiles()
+	//updatePlayerTiles()
 	qcAssertPos()
 	qcGetTiles("30")
 	qc("\"commandName\":\"startPlaying\"")
 	qcSend(conn)
 	li := 0
+	ticksSinceClick := 0
 	gloop:
 	for {
-		regenReward := false
+		//regenReward := false
 		for ; unprocessedCommands > 0; {
 			unprocessedCommands--
 			v := <-ch
@@ -653,48 +915,71 @@ func gameloop(ch <-chan map[string]interface{}, conn *websocket.Conn) {
 				cqSetTiles(v)
 			case "removeAllEntities":
 				world.enemies = make([]Pos, 0)
-				regenReward = true
+				//regenReward = true
 			case "addEntity":
 				cqAddEntity(v)
-				regenReward = true
+				//regenReward = true
 			case "setInventory":
 			default:
 				fmt.Println(v["commandName"].(string))
 			}
 		}
-		if regenReward { updatePlayerReward() }
+		//if regenReward { updatePlayerReward() }
 		for ev := sdl.PollEvent(); ev != nil; ev = sdl.PollEvent() {
 			switch ev.(type) {
 			case *sdl.QuitEvent:
 				break gloop
 			case *sdl.MouseButtonEvent:
 				e := ev.(*sdl.MouseButtonEvent)
-				if e.Type == sdl.MOUSEBUTTONUP {
+				if e.Type == sdl.MOUSEBUTTONDOWN {
+					locpl.towardsGoal = astar(
+						Pos{locpl.x + MouseXT, locpl.y + MouseYT},
+						Pos{locpl.x, locpl.y})
+				} else if e.Type == sdl.MOUSEBUTTONUP {
+					playerMoveTowardsGoal()
 					//cxt0 := int32(300-4)
 					//cyt0 := int32(300-4)
 					//rx := int(floordiv(e.X - cxt0, 8))
 					//ry := int(floordiv(e.Y - cyt0, 8))
 					//moveToRelpos(rx, ry)
-					x, y := mostRewardingRelpos()
-					moveToRelpos(x, y)
+					//x, y := mostRewardingRelpos()
+					//moveToRelpos(x, y)
 				}
+				ticksSinceClick = 0
 			case *sdl.MouseMotionEvent:
 				e := ev.(*sdl.MouseMotionEvent)
 				MouseX = e.X
 				MouseY = e.Y
-				cxt0 := int32(300-4)
-				cyt0 := int32(300-4)
+				cxt0 := int32(Winhw-4)
+				cyt0 := int32(Winhh-4)
 				MouseXT = int(floordiv(e.X - cxt0, 8))
 				MouseYT = int(floordiv(e.Y - cyt0, 8))
-				updatePlayerReward()
+				//updatePlayerReward()
 			}
 		}
+		if locpl.walkingTowardsGoal {
+			playerMoveTowardsGoal()
+		}
+		if ticksSinceClick > 40 {
+			ticksSinceClick = 0
+			updatePlayerRewardUndirection()
+			x, y := mostRewardingRelpos()
+			moveToRelpos(x, y)
+		}
+		//ticksSinceClick++
 		//playerWalk(0)
 		if li % 10 == 0 {
 			qcGetEntities()
 		}
+		if li % 20 == 15 {
+			unloadFarChunks()
+		}
 		qcSend(conn)
 		draw()
+		if getStepsLeft() > 32 {
+			locpl.lastFullStepsTime = time.Now()
+			locpl.stepsTakenSinceFull = 0
+		}
 		t, _ := time.ParseDuration("50ms")
 		time.Sleep(t)
 		li++
@@ -731,7 +1016,7 @@ func main() {
 	fmt.Println("Hello word")
 	err := sdl.Init(sdl.INIT_EVERYTHING)
 	if err != nil { panic(err) }
-	win, ren, err := sdl.CreateWindowAndRenderer(600, 600, 0)
+	win, ren, err := sdl.CreateWindowAndRenderer(int32(2 * Winhw), int32(2 * Winhh), 0)
 	winp = win
 	renp = ren
 	renp.SetDrawBlendMode(sdl.BLENDMODE_BLEND)
