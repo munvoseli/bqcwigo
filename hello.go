@@ -40,7 +40,8 @@ type LocalPlayer struct {
 	tilesData []uint8
 	rewardApothem int
 	lastFullStepsTime time.Time
-	lastMineTime time.Time
+	lastBreakTime time.Time
+	lastBreakPos Pos
 	stepsTakenSinceFull int
 	towardsGoal map[Pos] Pos
 	walkingTowardsGoal bool
@@ -145,7 +146,7 @@ func astar(startpos Pos, endpos Pos) map[Pos] Pos {
 	}
 	d := func(t uint8) int {
 		if t >= 0x81 && t <= 0x88 { return 20 }
-		if t >= 0x91 && t <= 0x94 { return -1 }
+		if t >= 0x91 && t <= 0x94 { return 0 }
 		return 2
 	}
 	openSet := []Pos { Pos{0, 0}, startpos }
@@ -185,7 +186,11 @@ func astar(startpos Pos, endpos Pos) map[Pos] Pos {
 		}
 		return nm
 	}*/
+	fmt.Println("started a*")
 	for {
+		if len(openSet) == 0 {
+			panic("ksdflja")
+		}
 		if len(openSet) == 1 { // just the placeholder element
 			fmt.Println("could find no path")
 			return cameFrom//processCameFrom()
@@ -193,7 +198,7 @@ func astar(startpos Pos, endpos Pos) map[Pos] Pos {
 		var current Pos
 		openSet, current = remFromHeap(openSet)
 		if current == endpos {
-			//fmt.Println("got it")
+			fmt.Println("got it")
 			return cameFrom//processCameFrom()
 		}
 		ma(current, Pos{current.x, current.y+1})
@@ -431,6 +436,9 @@ func emptyChunk(cx, cy int) Chunk {
 }
 
 func worldGetTile(x, y int) uint8 {
+	if x == locpl.lastBreakPos.x && y == locpl.lastBreakPos.y {
+		return 80
+	}
 	cx := x &^ 127
 	cy := y &^ 127
 	var pos struct { x, y int }
@@ -786,6 +794,10 @@ func qcGetTiles(sz string) {
 	qc("\"commandName\":\"getTiles\",\"size\":" + sz)
 }
 
+func qcRemoveTile(dir uint8) {
+	qc(fmt.Sprintf("\"commandName\":\"removeTile\",\"direction\":%d", dir))
+}
+
 func draw() {
 	err := renp.SetRenderTarget(nil)
 	renp.SetDrawColor(0, 0, 0, 255)
@@ -865,7 +877,7 @@ func playerMoveTowardsGoal() bool {
 	var reachedDestination bool
 	fmt.Println(getStepsLeft())
 	for {
-		if getStepsLeft() < 8 {
+		if getStepsLeft() < 8 || time.Since(locpl.lastBreakTime) < 700 * time.Millisecond {
 			reachedDestination = false
 			break
 		}
@@ -880,6 +892,13 @@ func playerMoveTowardsGoal() bool {
 		} else if dst.y < locpl.y { d = 0
 		} else if dst.x < locpl.x { d = 3
 		} else { panic("slkdfja") }
+		if canRemoveTile(worldGetTile(dst.x, dst.y)) {
+			reachedDestination = false
+			locpl.lastBreakTime = time.Now()
+			locpl.lastBreakPos = dst
+			qcRemoveTile(d)
+			break
+		}
 		qcWalk(d)
 		locpl.x = dst.x
 		locpl.y = dst.y
